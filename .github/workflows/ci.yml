@@ -39,5 +39,10 @@ jobs:
           python python-workflow/midi2nbs.py python-workflow/samples/demo.mid -o out/py_A.nbs --force
           python python-workflow/nbs_postprocess.py --in out/py_A.nbs --out out/py_B.nbs
           .\cpp\build\NyaaFlavor-cli.exe python-workflow/samples/demo.mid -o out/cpp_B.nbs --force
-          fc.exe /b out/py_A.nbs out/cpp_A.nbs
-          fc.exe /b out/py_B.nbs out/cpp_B.nbs
+          $a1 = (Get-FileHash out\py_A.nbs -Algorithm SHA256).Hash
+          $a2 = (Get-FileHash out\cpp_A.nbs -Algorithm SHA256).Hash
+          $b1 = (Get-FileHash out\py_B.nbs -Algorithm SHA256).Hash
+          $b2 = (Get-FileHash out\cpp_B.nbs -Algorithm SHA256).Hash
+          if ($a1 -ne $a2) { throw "A.nbs differs: $a1 != $a2" }
+          if ($b1 -ne $b2) { throw "B.nbs differs: $b1 != $b2" }
+          Write-Host "A/B byte-identical: $a1 / $b1"
