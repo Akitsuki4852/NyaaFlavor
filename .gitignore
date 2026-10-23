@@ -1,0 +1,39 @@
+# 构建产物 / 二进制（按需重建；发布时走 GitHub Releases）
+cpp/build/
+cpp/artifacts/
+
+# archive 里是旧的 tkinter 版（含它自己的 .git 和 exe），不进本仓库版本库
+NyaaFlavor-archive/
+archive/
+
+# 转换产物 / 本地曲库
+*_A.nbs
+*_B.nbs
+out/
+输出/
+midi/
+
+# 音频 / 本地曲库
+*.wav
+*.mp3
+*.flac
+
+# 临时 / IDE / Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+*.egg-info/
+dist/
+.venv/
+venv/
+.vscode/
+.idea/
+.DS_Store
+
+# 构建 / 编辑器
+*.log
+.vs/
+*.user
+*.suo

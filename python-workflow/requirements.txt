@@ -1,0 +1,5 @@
+# python-workflow/ 的依赖（Python 3.10+）
+# ① gp2midi.py 必须要 mido；
+# ②③ 想把中文曲名/层名转成拼音才要 pypinyin（不装也能跑，但中文会变成 ?）。
+mido>=1.2
+pypinyin>=0.49

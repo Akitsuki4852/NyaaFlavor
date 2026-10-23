@@ -1,0 +1,43 @@
+name: test
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  python:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python: ["3.10", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: python -m pip install --upgrade pip
+      - run: python -m pip install -r python-workflow/requirements.txt -r python-workflow/requirements-dev.txt
+      - run: python -m pytest -q
+
+  cpp-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: python -m pip install -r python-workflow/requirements.txt
+      - name: Build CLI and GUI
+        shell: powershell
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File .\cpp\build.ps1 all
+      - name: Smoke test and byte parity
+        shell: powershell
+        run: |
+          New-Item -ItemType Directory -Force out | Out-Null
+          python python-workflow/midi2nbs.py python-workflow/samples/demo.mid -o out/py_A.nbs --force
+          python python-workflow/nbs_postprocess.py --in out/py_A.nbs --out out/py_B.nbs
+          .\cpp\build\NyaaFlavor-cli.exe python-workflow/samples/demo.mid -o out/cpp_B.nbs --force
+          fc.exe /b out/py_A.nbs out/cpp_A.nbs
+          fc.exe /b out/py_B.nbs out/cpp_B.nbs

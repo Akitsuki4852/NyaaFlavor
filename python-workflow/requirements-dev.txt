@@ -1,0 +1,5 @@
+# 开发/测试依赖（Python 3.10+）
+-r requirements.txt
+pytest>=8
+# 生成 cpp/src/pinyin_table.cpp 需要固定版本，保证生成结果可复现
+pypinyin==0.55.0

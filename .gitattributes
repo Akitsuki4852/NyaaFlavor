@@ -1,0 +1,15 @@
+# 换行统一：仓库里按 LF 存；PowerShell 脚本检出为 CRLF。
+* text=auto
+
+*.ps1 text eol=crlf
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# 二进制：不要让 git 动它们
+*.nbs binary
+*.mid binary
+*.midi binary
+*.exe binary
+*.zip binary
+*.png binary
+*.obj binary
