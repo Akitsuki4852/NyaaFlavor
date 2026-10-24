@@ -517,6 +517,85 @@ class TimeMap:
         return self._sec[i] + (tick - base_t) / self.ppq * (base_us / 1e6)
 
 
+@dataclass(frozen=True)
+class TempoStep:
+    """一个阶梯：MIDI tick 区间 + 平均 BPM + 每拍写几个 NBS tick。"""
+    midi_t0: int
+    midi_t1: int
+    bpm: float
+    ticks_per_beat: int
+    nbs_t0: int = 0
+
+
+def tempo_segments(tempos, ppq: int, end_tick: int):
+    """tempo map → [(midi_t0, midi_t1, bpm, 秒数)]。"""
+    out = []
+    for i, (t, us) in enumerate(tempos):
+        t1 = tempos[i + 1][0] if i + 1 < len(tempos) else max(end_tick, t)
+        if t1 <= t:
+            continue
+        out.append((t, t1, 60_000_000.0 / us, (t1 - t) / ppq * (us / 1e6)))
+    return out
+
+
+def dominant_bpm(segs):
+    """主速度 = 按时长加权的众数，再取 ±2% 内各段的时长加权均值。"""
+    hist = defaultdict(float)
+    for _, _, bpm, secs in segs:
+        hist[round(bpm * 2) / 2] += secs
+    if not hist:
+        return None
+    peak = max(hist, key=hist.get)
+    near = [(bpm, secs) for _, _, bpm, secs in segs if abs(bpm - peak) <= peak * 0.02]
+    total = sum(secs for _, secs in near)
+    return sum(bpm * secs for bpm, secs in near) / total if total else float(peak)
+
+
+def build_tempo_steps(segs, ppq: int, grid: int, ref_bpm: float, step_beats: float = 4.0):
+    """把速度曲线折成阶梯：每 `step_beats` 拍取一次时长加权平均 BPM，
+    再换成整数 ticks_per_beat。渐快/渐慢于是变成几档 12 → 11 → 10 → 9 → 8。"""
+    if not segs:
+        return []
+    end_tick = segs[-1][1]
+    step = max(1, int(round(step_beats * ppq)))
+    buckets = []
+    t = 0
+    while t < end_tick:
+        t1 = min(end_tick, t + step)
+        acc_bpm = acc_sec = 0.0
+        for s0, s1, bpm, _ in segs:
+            lo, hi = max(t, s0), min(t1, s1)
+            if hi <= lo:
+                continue
+            sec = (hi - lo) / ppq * 60.0 / bpm
+            acc_sec += sec
+            acc_bpm += bpm * sec
+        if acc_sec <= 0:
+            t = t1
+            continue
+        bpm_avg = acc_bpm / acc_sec
+        m = max(1, min(8 * grid, int(round(grid * ref_bpm / bpm_avg))))
+        if buckets and buckets[-1][3] == m and buckets[-1][1] == t:
+            buckets[-1] = (buckets[-1][0], t1, bpm_avg, m)
+        else:
+            buckets.append((t, t1, bpm_avg, m))
+        t = t1
+
+    # 累积 NBS 起点；段边界对齐到整拍，保证主体继续踩在 grid 上
+    out, pos = [], 0
+    for i, (t0, t1, bpm, m) in enumerate(buckets):
+        out.append(TempoStep(t0, t1, bpm, m, pos))
+        pos += max(0, int(round((t1 - t0) * m / ppq)))
+        pos = int(round(pos / grid)) * grid
+    return out
+
+
+def map_to_steps(steps, midi_tick: int, ppq: int) -> int:
+    i = bisect_right([s.midi_t0 for s in steps], midi_tick) - 1
+    st = steps[max(0, min(i, len(steps) - 1))]
+    return st.nbs_t0 + int(round((midi_tick - st.midi_t0) * st.ticks_per_beat / ppq))
+
+
 def track_name(tr, idx: int) -> str:
     for _, e in tr:
         if e[0] == 'name' and e[2]:
@@ -787,6 +866,7 @@ class Options:
     drum_fallback: bool = True   # 表外打击乐（沙锤/三角铁…）走 u3002 / OpenNBS 表
     separators: bool = True
     time_mode: str = 'grid'       # grid=按乐谱位置量化（推荐）| real=按真实秒数
+    tempo_align: bool = False     # 主速度对齐 + 阶梯变速（多速谱用）
     gliss: str = 'diatonic'       # diatonic=整条半音阶换成调内装饰音 | keep=原样保留
     key: Optional[str] = None     # 手写调名，如 'Ab' / 'Fm'
     gp: Optional[str] = None      # 手写 Guitar Pro 谱路径（拆人声声部用）
@@ -811,8 +891,19 @@ def convert(midi_path: Path, opt: Options) -> Tuple[dict, List[Part], dict]:
                 gp_path = cand
                 break
 
+    # 基准速度：默认用第一个 tempo 事件；开 --tempo-align 时改用「主速度」，
+    # 其余速度段用阶梯伸缩（每个阶梯一个整数 ticks_per_beat）。
+    tempo_steps: List[TempoStep] = []
     first_us = tempos[0][1]
     bpm = 60_000_000.0 / first_us
+    if opt.tempo_align:
+        last_midi_tick = max((t for tr in tracks for t, _ in tr), default=0)
+        segs = tempo_segments(tempos, ppq, last_midi_tick)
+        if len({round(b, 2) for _, _, b, _ in segs}) > 1:
+            ref = dominant_bpm(segs)
+            if ref:
+                bpm = ref
+                tempo_steps = build_tempo_steps(segs, ppq, opt.grid, ref)
     tps = bpm * opt.grid / 60.0
     nbs_tempo = max(1, min(65535, int(round(tps * 100))))
     tps = nbs_tempo / 100.0       # 以写入文件的实际值为准
@@ -824,6 +915,8 @@ def convert(midi_path: Path, opt: Options) -> Tuple[dict, List[Part], dict]:
             这样小节线、和弦天然对齐，也不会因为 tempo 四舍五入而累积漂移。
         real：按真实秒数量化，适合中途变速/自由速度的素材。
         """
+        if tempo_steps:
+            return map_to_steps(tempo_steps, midi_tick, ppq)
         if opt.time_mode == 'real':
             return int(round(tm.seconds(midi_tick) * tps))
         return int(round(midi_tick * opt.grid / ppq))
@@ -977,6 +1070,9 @@ def convert(midi_path: Path, opt: Options) -> Tuple[dict, List[Part], dict]:
     )
     info = dict(fmt=fmt, ntrks=len(tracks), ppq=ppq, bpm=bpm, tps=tps,
                 grid=opt.grid, tempo=nbs_tempo, tempos=tempos,
+                tempo_align=[dict(bpm=round(st.bpm, 2), ticks_per_beat=st.ticks_per_beat,
+                                  beats=round((st.midi_t1 - st.midi_t0) / ppq, 2),
+                                  nbs_t0=st.nbs_t0) for st in tempo_steps],
                 duration_sec=last_sec, stats=stats,
                 unknown_drums=sorted(unknown_drums),
                 key=dict(root=root, mode=mode, source=key_src, name=key_display,
@@ -1274,6 +1370,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     ap.add_argument('--grid', type=int, default=8, help='每拍几条 NBS tick（默认 8 = 32 分音符）')
     ap.add_argument('--time', choices=['grid', 'real'], default='grid',
                     help='时间换算：grid=按乐谱位置（默认）| real=按真实秒数')
+    ap.add_argument('--tempo-align', action='store_true',
+                    help='变速曲：按「主速度」定 tempo，前奏/尾奏/渐快用阶梯伸缩对齐到 tick')
     ap.add_argument('--gliss', choices=['diatonic', 'keep'], default='diatonic',
                     help='glissando（那条半音阶跑句）：diatonic=换成调内装饰音（默认）| keep=原样保留')
     ap.add_argument('--key', default=None,
@@ -1325,7 +1423,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                   keep_order=args.keep_order,
                   drum_fallback=args.drum_fallback,
                   separators=not args.no_separators, time_mode=args.time,
-                  gliss=args.gliss, key=args.key,
+                  gliss=args.gliss, key=args.key, tempo_align=args.tempo_align,
                   gp=args.gp, auto_gp=not args.no_gp)
 
     header, parts, info = convert(midi_path, opt)
@@ -1380,7 +1478,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
               f'—— 交给第 ③ 步处理')
     if info.get('unknown_drums'):
         print(f'  ⚠ 默认鼓表里没有的 GM 打击乐音高：{info["unknown_drums"]}（已按军鼓兜底）')
-    if len({u for _, u in info['tempos']}) > 1:
+    if info.get('tempo_align'):
+        steps = info['tempo_align']
+        seg = ' → '.join(f'{s["bpm"]:.0f}×{s["ticks_per_beat"]}' for s in steps)
+        print(f'  · 变速曲：基准 {info["bpm"]:.2f} BPM，{len(steps)} 档阶梯对齐'
+              f'（每档 = 该段 BPM × 每拍 tick 数）：{seg}')
+    elif len({u for _, u in info['tempos']}) > 1:
         print(f'  · MIDI 含 {len(info["tempos"])} 个速度事件，NBS 只能定速：'
               f'按首段 {info["bpm"]:.2f} BPM 写（要严格保时长用 --time real）')
     print(f'  相邻不到 2 tick 的同音高重复触发：{rep["retrigger"]}'
