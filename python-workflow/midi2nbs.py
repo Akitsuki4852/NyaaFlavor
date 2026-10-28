@@ -875,6 +875,8 @@ class Options:
 
 def convert(midi_path: Path, opt: Options) -> Tuple[dict, List[Part], dict]:
     fmt, ntrks, ppq, tracks = smf.parse_midi(str(midi_path))
+    # 每拍 tick 数（4/8/16 = 二分精度；6/12/24 = 三连音档，24 同时容得下 1/8、1/16 和三连音）
+    grid = opt.grid
     tempos = build_tempo_map(tracks)
     tm = TimeMap(tempos, ppq)
 
@@ -903,8 +905,8 @@ def convert(midi_path: Path, opt: Options) -> Tuple[dict, List[Part], dict]:
             ref = dominant_bpm(segs)
             if ref:
                 bpm = ref
-                tempo_steps = build_tempo_steps(segs, ppq, opt.grid, ref)
-    tps = bpm * opt.grid / 60.0
+                tempo_steps = build_tempo_steps(segs, ppq, grid, ref)
+    tps = bpm * grid / 60.0
     nbs_tempo = max(1, min(65535, int(round(tps * 100))))
     tps = nbs_tempo / 100.0       # 以写入文件的实际值为准
 
@@ -919,7 +921,7 @@ def convert(midi_path: Path, opt: Options) -> Tuple[dict, List[Part], dict]:
             return map_to_steps(tempo_steps, midi_tick, ppq)
         if opt.time_mode == 'real':
             return int(round(tm.seconds(midi_tick) * tps))
-        return int(round(midi_tick * opt.grid / ppq))
+        return int(round(midi_tick * grid / ppq))
 
     # --- 轨名 → 声部；轨名认不出来时按内容兜底（音区中位数 + 平均同时发声）---
     track_stat: Dict[int, Tuple[float, float]] = {}
@@ -1035,7 +1037,7 @@ def convert(midi_path: Path, opt: Options) -> Tuple[dict, List[Part], dict]:
     root, mode, key_src, key_display = resolve_key(midi_path, all_pitches, opt.key)
     pcs = scale_pcs(root, mode)
     gliss_gap = max(2, ppq // 12)        # ≤ 1/12 拍才算 gliss 的一步（16 分音符不会误伤）
-    tick_step = max(1, ppq // opt.grid)  # 一个 NBS tick 等于多少 MIDI tick
+    tick_step = max(1, ppq // grid)  # 一个 NBS tick 等于多少 MIDI tick
     gliss_runs = 0
     gliss_dropped = 0
     for part in pitched.values():
@@ -1069,7 +1071,7 @@ def convert(midi_path: Path, opt: Options) -> Tuple[dict, List[Part], dict]:
         vanilla=20,
     )
     info = dict(fmt=fmt, ntrks=len(tracks), ppq=ppq, bpm=bpm, tps=tps,
-                grid=opt.grid, tempo=nbs_tempo, tempos=tempos,
+                grid=grid, tempo=nbs_tempo, tempos=tempos,
                 tempo_align=[dict(bpm=round(st.bpm, 2), ticks_per_beat=st.ticks_per_beat,
                                   beats=round((st.midi_t1 - st.midi_t0) / ppq, 2),
                                   nbs_t0=st.nbs_t0) for st in tempo_steps],
@@ -1367,7 +1369,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     ap.add_argument('--title', default=None, help='曲名（默认用文件名）')
     ap.add_argument('--author', default='', help='NBS 作者字段')
     ap.add_argument('--orig-author', default='', help='原曲作者字段')
-    ap.add_argument('--grid', type=int, default=8, help='每拍几条 NBS tick（默认 8 = 32 分音符）')
+    ap.add_argument('--grid', type=int, default=8, choices=[4, 6, 8, 12, 16, 24],
+                    help='每拍几条 NBS tick（默认 8）。4/8/16 是二分精度；'
+                         '6/12/24 = 8 的 3/4、3/2、3 倍，给三连音用（24 同时容得下 1/8、1/16）')
     ap.add_argument('--time', choices=['grid', 'real'], default='grid',
                     help='时间换算：grid=按乐谱位置（默认）| real=按真实秒数')
     ap.add_argument('--tempo-align', action='store_true',
@@ -1438,7 +1442,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
           f'每拍 {info["ppq"]} tick, {info["bpm"]:.2f} BPM, '
           f'{len(info["tempos"])} 个速度事件')
     print(f'  时间轴 : tempo={info["tempo"]} ({info["tps"]:.2f} tick/秒), '
-          f'1 拍 = {opt.grid} tick, 量化误差 < {0.5 / info["tps"] * 1000:.1f} ms')
+          f'1 拍 = {info["grid"]} tick'
+          + ('（三连音档：1/3 拍 = %d tick）' % (info['grid'] // 3)
+             if info['grid'] in (6, 12, 24) else '')
+          + f', 量化误差 < {0.5 / info["tps"] * 1000:.1f} ms')
     k = info['key']
     print(f'  调性   : {k["name"]}（{k["source"]}，调内音级 '
           f'{", ".join(PITCH_CLASS_NAME[x] for x in k["pcs"])}）')
@@ -1492,6 +1499,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     print(f'  最大同时发声：{rep["poly_max"]} 个'
           + ('  ⚠ 超过 40，Notebot 可能漏音' if rep['poly_max'] > 40 else ''))
 
+    if notes and max(n[0] for n in notes) >= 65535:
+        print('  ⚠ 长度超过 NBS 的 65535 tick 上限，尾部会被截断'
+              '（可降到 --grid 12 或 8）')
+
     if args.dry_run:
         return 0
 
@@ -1510,7 +1521,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     if args.report:
         payload = dict(midi=str(midi_path), output=str(out), tempo=info['tempo'],
-                       bpm=info['bpm'], grid=opt.grid, layers=len(layers),
+                       bpm=info['bpm'], grid=info['grid'], layers=len(layers),
                        notes=len(notes), key=info['key'], gliss=info['gliss'],
                        vocal=info['vocal'], gp=info.get('gp_path', ''),
                        blocks=rep['blocks'],
