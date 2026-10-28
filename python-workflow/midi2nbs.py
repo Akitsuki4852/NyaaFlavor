@@ -1369,9 +1369,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     ap.add_argument('--title', default=None, help='曲名（默认用文件名）')
     ap.add_argument('--author', default='', help='NBS 作者字段')
     ap.add_argument('--orig-author', default='', help='原曲作者字段')
-    ap.add_argument('--grid', type=int, default=8, choices=[4, 6, 8, 12, 16, 24],
-                    help='每拍几条 NBS tick（默认 8）。4/8/16 是二分精度；'
-                         '6/12/24 = 8 的 3/4、3/2、3 倍，给三连音用（24 同时容得下 1/8、1/16）')
+    ap.add_argument('--grid', type=int, default=8,
+                    help='每拍几条 NBS tick（默认 8）。常用 4/8/16（二分精度）、'
+                         '6/12/24（8 的 3/4、3/2、3 倍，给三连音用）；其它整数也可以')
     ap.add_argument('--time', choices=['grid', 'real'], default='grid',
                     help='时间换算：grid=按乐谱位置（默认）| real=按真实秒数')
     ap.add_argument('--tempo-align', action='store_true',
