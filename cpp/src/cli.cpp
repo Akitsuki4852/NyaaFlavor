@@ -104,7 +104,7 @@ struct Args {
 // 已知的「需要值」的参数名
 const char* const kValueOpts[] = {"-o", "--out", "--output", "--grid", "--time", "--gliss", "--key",
                                   "--gp", "--title", "--author", "--orig-author",
-                                  "--min-ms", "--musescore", "--strings", "--compare", "--align", "--shift",
+                                  "--min-ms", "--musescore", "--strings", "--compare", "--align", "--shift", "--tempo-mode",
                                   "--keep-low", "--bell-offset", "--report", "--in"};
 
 bool needs_value(const std::string& a) {
@@ -187,9 +187,10 @@ int run_midi2nbs(const std::vector<std::string>& argv, const OutFn& out) {
         out("用法: NyaaFlavor-cli <输入.mid|输入.gp> [选项]");
         out("  doctor                 检查环境（MuseScore / NBS 读写）");
         out("  -o, --out FILE         输出文件（同时写同名的 _A.nbs）");
-        out("  --grid 4|8|16          每拍几条 NBS tick（默认 8）");
+        out("  --grid N               每拍几条 NBS tick（默认 8）。常用 4/8/16、6/12/24（三连音档），也可自己填");
         out("  --time grid|real       时间换算方式（real 按真实秒数）");
         out("  --gliss diatonic|keep  滑音处理（默认 diatonic）");
+        out("  --tempo-mode staircase|changer|none   变速拟似（默认 staircase；changer 为占位）");
         out("  --key Ab|C#m           手写调名");
         out("  --title / --author / --orig-author   写进文件头的名字");
         out("  --no-octave-modifier   不使用音色自身八度差（key 一律 = MIDI−21）");
@@ -242,6 +243,13 @@ int run_midi2nbs(const std::vector<std::string>& argv, const OutFn& out) {
     opt.key = a.get("--key");
     opt.gp = a.get("--gp");
     opt.auto_gp = !a.on("--no-gp");
+    {
+        const std::string mode = a.get("--tempo-mode", "staircase");
+        opt.tempo_mode = mode == "none" ? TempoMode::None
+                        : mode == "changer" ? TempoMode::Changer
+                                            : TempoMode::Staircase;
+        if (a.flag.count("--tempo-align")) opt.tempo_mode = TempoMode::Staircase;   // 与 Python 同名
+    }
 
     Header header;
     std::vector<Part> parts;
@@ -272,8 +280,11 @@ int run_midi2nbs(const std::vector<std::string>& argv, const OutFn& out) {
         {
             std::map<int, int> uniq;
             for (const auto& t : info.tempos) uniq[t.second] += 1;
-            if (uniq.size() > 1)
+            if (uniq.size() > 1 && info.tempo_mode == TempoMode::None)
                 out("· 曲子中途变速；NBS 只能定速，已按开头 " + fmt_2(info.bpm) + " BPM 转换");
+            if (info.tempo_steps.size() > 1)
+                out("· 变速拟似（阶梯）：基准 " + fmt_2(info.bpm) + " BPM，" +
+                    std::to_string(info.tempo_steps.size()) + " 档");
         }
         if (rep.poly_max > 40)
             out("注意：最大同时发声 " + std::to_string(rep.poly_max) + " 个，游戏里可能漏音");
@@ -284,6 +295,17 @@ int run_midi2nbs(const std::vector<std::string>& argv, const OutFn& out) {
             " 个速度事件");
         out("  时间轴 : tempo=" + std::to_string(info.tempo) + " (" + fmt_2(info.tps) + " tick/秒), 1 拍 = " +
             std::to_string(opt.grid) + " tick, 量化误差 < " + fmt_1(0.5 / info.tps * 1000) + " ms");
+        if (info.tempo_mode == TempoMode::Changer)
+            out("  · 变速拟似: TempoChanger 还没实现，本次按「阶梯」处理");
+        if (info.tempo_steps.size() > 1) {
+            std::string line = "  变速拟似: 阶梯 " + std::to_string(info.tempo_steps.size()) + " 档（基准 " +
+                               fmt_2(info.bpm) + " BPM）：";
+            for (size_t i = 0; i < info.tempo_steps.size(); ++i) {
+                if (i) line += " → ";
+                line += fmt_1(info.tempo_steps[i].bpm) + "×" + std::to_string(info.tempo_steps[i].tpb);
+            }
+            out(line);
+        }
         out("  调性   : " + info.key.name + "（" + info.key.source + "，调内音级 " + join_pcs(info.key.pcs) + "）");
         if (info.gliss.mode == "diatonic") {
             out("  gliss  : " + std::to_string(info.gliss.runs) + " 条半音阶跑句 → 调内装饰音（净减 " +
@@ -343,7 +365,7 @@ int run_midi2nbs(const std::vector<std::string>& argv, const OutFn& out) {
         {
             std::map<int, int> uniq;
             for (const auto& t : info.tempos) uniq[t.second] += 1;
-            if (uniq.size() > 1)
+            if (uniq.size() > 1 && info.tempo_mode == TempoMode::None)
                 out("  · MIDI 含 " + std::to_string(info.tempos.size()) + " 个速度事件，NBS 只能定速：按首段 " +
                     fmt_2(info.bpm) + " BPM 写（要严格保时长用 --time real）");
         }
@@ -510,6 +532,7 @@ int cli_main(const std::vector<std::string>& argv, const OutFn& out) {
         if (a.on("--no-octave-modifier")) av.push_back("--no-octave-modifier");
         if (a.on("--keep-order")) av.push_back("--keep-order");
         if (a.on("--no-separators")) av.push_back("--no-separators");
+        av.insert(av.end(), {"--tempo-mode", a.get("--tempo-mode", "staircase")});
         if (a.on("--no-drum-fallback")) av.push_back("--no-drum-fallback");
         if (a.has("--title")) av.insert(av.end(), {"--title", a.get("--title")});
         if (a.has("--author")) av.insert(av.end(), {"--author", a.get("--author")});

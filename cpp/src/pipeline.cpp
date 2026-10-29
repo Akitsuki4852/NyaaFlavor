@@ -17,6 +17,7 @@ ConvertResult convert_pipeline(const std::string& input, const std::string& out_
     if (!opt.musescore.empty()) argv.insert(argv.end(), {"--musescore", opt.musescore});
     if (!opt.key.empty()) argv.insert(argv.end(), {"--key", opt.key});
     argv.insert(argv.end(), {"--time", opt.time_mode, "--min-ms", std::to_string(opt.min_ms)});
+    argv.insert(argv.end(), {"--tempo-mode", opt.tempo_mode});
     if (opt.keep_midi) argv.push_back("--keep-midi");
     if (!opt.use_gp) argv.push_back("--no-gp");
 

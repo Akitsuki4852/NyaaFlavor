@@ -574,6 +574,92 @@ struct PitchedStore {
 }  // namespace
 
 // ---------------------------------------------------------------------------
+// 变速拟似：主速度 + 阶梯（tempo_align 的 C++ 版）
+// ---------------------------------------------------------------------------
+struct TempoStep {
+    int midi_t0 = 0, midi_t1 = 0;
+    double bpm = 0;
+    int tpb = 8;    // 每拍写几个 NBS tick
+    int nbs_t0 = 0;
+};
+
+std::vector<TempoStep> tempo_segments(const std::vector<std::pair<int, int>>& tempos, int /*ppq*/, int end_tick) {
+    std::vector<TempoStep> out;
+    for (size_t i = 0; i < tempos.size(); ++i) {
+        const int t = tempos[i].first;
+        const int t1 = (i + 1 < tempos.size()) ? tempos[i + 1].first : std::max(end_tick, t);
+        if (t1 <= t) continue;
+        out.push_back(TempoStep{t, t1, 60000000.0 / tempos[i].second, 8, 0});
+    }
+    return out;
+}
+
+double dominant_bpm(const std::vector<TempoStep>& segs, int ppq) {
+    std::map<long long, double> hist;                 // 0.5 BPM 桶 -> 秒数
+    std::vector<std::pair<double, double>> items;     // (bpm, 秒数)
+    for (const auto& s : segs) {
+        const double sec = (double)(s.midi_t1 - s.midi_t0) * 60.0 / (ppq * s.bpm);
+        items.emplace_back(s.bpm, sec);
+        hist[(long long)py_round_int(s.bpm * 2)] += sec;
+    }
+    if (items.empty()) return 0;
+    long long peak = 0;
+    double best = -1;
+    for (const auto& kv : hist)
+        if (kv.second > best) { best = kv.second; peak = kv.first; }
+    const double peak_bpm = peak / 2.0;
+    double num = 0, den = 0;
+    for (const auto& it : items)
+        if (std::fabs(it.first - peak_bpm) <= peak_bpm * 0.02) { num += it.first * it.second; den += it.second; }
+    return den > 0 ? num / den : peak_bpm;
+}
+
+// 每 step_beats 拍取一次时长加权平均 BPM，再换成整数 ticks/拍；相邻同值合并
+std::vector<TempoStep> build_tempo_steps(const std::vector<TempoStep>& segs, int ppq, int grid, double ref_bpm,
+                                         double step_beats = 4.0) {
+    std::vector<TempoStep> buckets;
+    if (segs.empty()) return buckets;
+    const int end_tick = segs.back().midi_t1;
+    const int step = std::max(1, py_round_int(step_beats * ppq));
+    for (int t = 0; t < end_tick; t += step) {
+        const int t1 = std::min(end_tick, t + step);
+        double acc_bpm = 0, acc_sec = 0;
+        for (const auto& s : segs) {
+            const int lo = std::max(t, s.midi_t0), hi = std::min(t1, s.midi_t1);
+            if (hi <= lo) continue;
+            const double sec = (double)(hi - lo) * 60.0 / (ppq * s.bpm);
+            acc_sec += sec;
+            acc_bpm += s.bpm * sec;
+        }
+        if (acc_sec <= 0) continue;
+        const double bpm_avg = acc_bpm / acc_sec;
+        int m = py_round_int(grid * ref_bpm / bpm_avg);
+        m = std::max(1, std::min(8 * grid, m));
+        if (!buckets.empty() && buckets.back().tpb == m && buckets.back().midi_t1 == t)
+            buckets.back().midi_t1 = t1;
+        else
+            buckets.push_back(TempoStep{t, t1, bpm_avg, m, 0});
+    }
+    int pos = 0;
+    for (auto& b : buckets) {
+        b.nbs_t0 = pos;
+        pos += std::max(0, py_round_int((double)(b.midi_t1 - b.midi_t0) * b.tpb / ppq));
+        pos = py_round_int((double)pos / grid) * grid;    // 边界对齐到整拍
+    }
+    return buckets;
+}
+
+int map_to_steps(const std::vector<TempoStep>& steps, int midi_tick, int ppq) {
+    size_t lo = 0, hi = steps.size();
+    while (lo + 1 < hi) {                      // 找最后一个 midi_t0 <= tick 的段
+        const size_t mid = (lo + hi) / 2;
+        if (steps[mid].midi_t0 <= midi_tick) lo = mid; else hi = mid;
+    }
+    const TempoStep& s = steps[lo];
+    return s.nbs_t0 + py_round_int((double)(midi_tick - s.midi_t0) * s.tpb / ppq);
+}
+
+// ---------------------------------------------------------------------------
 // convert
 // ---------------------------------------------------------------------------
 void convert(const std::string& midi_path, const Options& opt, Header& header, std::vector<Part>& parts, Info& info) {
@@ -598,13 +684,28 @@ void convert(const std::string& midi_path, const Options& opt, Header& header, s
         }
     }
 
-    const int first_us = tempos[0].second;
-    const double bpm = 60000000.0 / first_us;
+    // 变速拟似：默认按「主速度」定 tempo，其余速度段折成阶梯（每档整数 ticks/拍）
+    double bpm = 60000000.0 / tempos[0].second;
+    std::vector<TempoStep> steps;
+    if (opt.tempo_mode != TempoMode::None) {
+        int last_tick = 0;
+        for (const auto& tr : tracks)
+            if (!tr.empty()) last_tick = std::max(last_tick, tr.back().tick);
+        auto segs = tempo_segments(tempos, mf.ppq, last_tick);
+        bool multi = false;
+        for (size_t i = 1; i < segs.size(); ++i)
+            if (std::fabs(segs[i].bpm - segs[0].bpm) > 1e-6) { multi = true; break; }
+        if (multi) {
+            const double ref = dominant_bpm(segs, mf.ppq);
+            if (ref > 0) { bpm = ref; steps = build_tempo_steps(segs, mf.ppq, opt.grid, ref); }
+        }
+    }
     double tps = bpm * opt.grid / 60.0;
     int nbs_tempo = std::max(1, std::min(65535, py_round_int(tps * 100)));
     tps = nbs_tempo / 100.0;
 
     auto tick_of = [&](int midi_tick) -> int {
+        if (!steps.empty()) return map_to_steps(steps, midi_tick, mf.ppq);
         if (opt.time_mode == "real") return py_round_int(tm.seconds(midi_tick) * tps);
         return py_round_int((double)midi_tick * opt.grid / mf.ppq);
     };
@@ -853,6 +954,9 @@ void convert(const std::string& midi_path, const Options& opt, Header& header, s
     info.grid = opt.grid;
     info.tempo = nbs_tempo;
     info.tempos = tempos;
+    info.tempo_mode = opt.tempo_mode;
+    for (const auto& st : steps)
+        info.tempo_steps.push_back(TempoStepInfo{st.bpm, st.tpb, (double)(st.midi_t1 - st.midi_t0) / mf.ppq, st.nbs_t0});
     info.duration_sec = last_sec;
     info.stats = stats;
     info.unknown_drums.assign(unknown_drums.begin(), unknown_drums.end());

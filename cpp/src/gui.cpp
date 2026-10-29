@@ -20,14 +20,15 @@ namespace fs = std::filesystem;
 namespace {
 constexpr wchar_t kApp[] = L"NyaaFlavor";
 enum : int {
-    IDC_LIST = 1001, IDC_ADD, IDC_REMOVE, IDC_CLEAR, IDC_GRID, IDC_GLISS, IDC_BORROW,
-    IDC_DRUM_FALLBACK, IDC_OUTDIR, IDC_PICKOUT, IDC_OPENOUT, IDC_START, IDC_PBAR, IDC_LOG,
+    IDC_LIST = 1001, IDC_ADD, IDC_REMOVE, IDC_CLEAR, IDC_GRID, IDC_GLISS, IDC_TEMPO,
+    IDC_OUTDIR, IDC_PICKOUT, IDC_OPENOUT, IDC_START, IDC_PBAR, IDC_LOG,
     IDC_CANCEL, IDC_STATUS, IDC_ADVANCED, IDC_COUNT,
-    ID_TITLE = 2000, ID_GRID, ID_GLISS, ID_OUT, ID_SUB, ID_FILES, ID_OPTIONS, ID_LOG,
-    ID_MS = 3000, ID_MS_PICK, ID_MIN_MS, ID_KEEP_MIDI, ID_REAL, ID_KEY, ID_GP,
+    ID_TITLE = 2000, ID_GRID, ID_GLISS, ID_TEMPO_LABEL, ID_OUT, ID_SUB, ID_FILES, ID_OPTIONS, ID_LOG,
+    ID_MS = 3000, ID_MS_PICK, ID_MIN_MS, ID_KEEP_MIDI, ID_REAL, ID_KEY, ID_GP, ID_BORROW,
 };
 constexpr UINT WM_LOG = WM_APP + 1, WM_PROGRESS = WM_APP + 2, WM_FINISH = WM_APP + 3, WM_AUTOSTART = WM_APP + 4;
-HWND g_main{}, g_list{}, g_grid{}, g_gliss{}, g_borrow{}, g_drum_fallback{}, g_outdir{}, g_start{}, g_pbar{}, g_log{}, g_status{};
+HWND g_main{}, g_list{}, g_grid{}, g_gliss{}, g_tempo{}, g_outdir{}, g_start{}, g_pbar{}, g_log{}, g_status{};
+std::wstring g_grid_last = L"8";   // 每拍格数：下拉里被选中「分组标题」时回退到它
 HFONT g_ui{}, g_title{}, g_logfont{};
 UINT g_dpi = 96;
 bool g_running = false, g_close_pending = false;
@@ -157,10 +158,13 @@ INT_PTR CALLBACK advanced_proc(HWND dialog, UINT msg, WPARAM wp, LPARAM lp) {
         add(L"STATIC", L"调性（可留空）", 0, -1, 14, 174, 90, 22);
         add(L"EDIT", nyaa::u8_to_w(opt->key).c_str(), WS_BORDER | ES_AUTOHSCROLL | WS_TABSTOP, ID_KEY, 110, 168, 390, 26);
         add(L"BUTTON", L"使用 GP 谱声部信息（自动找同名谱）", BS_AUTOCHECKBOX | WS_TABSTOP, ID_GP, 110, 210, 390, 24);
-        add(L"BUTTON", L"确定", BS_DEFPUSHBUTTON | WS_TABSTOP, IDOK, 340, 250, 74, 28);
-        add(L"BUTTON", L"取消", BS_PUSHBUTTON | WS_TABSTOP, IDCANCEL, 426, 250, 74, 28);
+        add(L"STATIC", L"", SS_ETCHEDHORZ, -1, 14, 246, 486, 2);
+        add(L"BUTTON", L"自动换音色（音色借用表）", BS_AUTOCHECKBOX | WS_TABSTOP, ID_BORROW, 14, 258, 460, 24);
+        add(L"BUTTON", L"确定", BS_DEFPUSHBUTTON | WS_TABSTOP, IDOK, 340, 296, 74, 28);
+        add(L"BUTTON", L"取消", BS_PUSHBUTTON | WS_TABSTOP, IDCANCEL, 426, 296, 74, 28);
         CheckDlgButton(dialog, ID_KEEP_MIDI, opt->keep_midi); CheckDlgButton(dialog, ID_REAL, opt->time_mode == "real"); CheckDlgButton(dialog, ID_GP, opt->use_gp);
-        RECT parent{}; GetWindowRect(g_main, &parent); const int w = px(530), h = px(330);
+        CheckDlgButton(dialog, ID_BORROW, opt->borrow_table);
+        RECT parent{}; GetWindowRect(g_main, &parent); const int w = px(530), h = px(372);
         SetWindowPos(dialog, nullptr, parent.left + (parent.right - parent.left - w) / 2, parent.top + (parent.bottom - parent.top - h) / 2, w, h, SWP_NOZORDER);
         return TRUE;
     }
@@ -178,7 +182,9 @@ INT_PTR CALLBACK advanced_proc(HWND dialog, UINT msg, WPARAM wp, LPARAM lp) {
             opt->musescore = nyaa::w_to_u8(text(GetDlgItem(dialog, ID_MS))); opt->key = nyaa::w_to_u8(text(GetDlgItem(dialog, ID_KEY)));
             opt->min_ms = threshold; opt->keep_midi = IsDlgButtonChecked(dialog, ID_KEEP_MIDI) == BST_CHECKED;
             opt->time_mode = IsDlgButtonChecked(dialog, ID_REAL) == BST_CHECKED ? "real" : "grid";
-            opt->use_gp = IsDlgButtonChecked(dialog, ID_GP) == BST_CHECKED; EndDialog(dialog, IDOK);
+            opt->use_gp = IsDlgButtonChecked(dialog, ID_GP) == BST_CHECKED;
+            opt->borrow_table = IsDlgButtonChecked(dialog, ID_BORROW) == BST_CHECKED;
+            EndDialog(dialog, IDOK);
         } else if (id == IDCANCEL) EndDialog(dialog, IDCANCEL);
         return TRUE;
     }
@@ -192,7 +198,7 @@ void advanced() {
 }
 
 void set_busy(bool busy) {
-    for (int id : {IDC_LIST, IDC_ADD, IDC_REMOVE, IDC_CLEAR, IDC_GRID, IDC_GLISS, IDC_BORROW, IDC_DRUM_FALLBACK, IDC_OUTDIR, IDC_PICKOUT, IDC_OPENOUT, IDC_START, IDC_ADVANCED}) EnableWindow(GetDlgItem(g_main, id), !busy);
+    for (int id : {IDC_LIST, IDC_ADD, IDC_REMOVE, IDC_CLEAR, IDC_GRID, IDC_GLISS, IDC_TEMPO, IDC_OUTDIR, IDC_PICKOUT, IDC_OPENOUT, IDC_START, IDC_ADVANCED}) EnableWindow(GetDlgItem(g_main, id), !busy);
     EnableWindow(GetDlgItem(g_main, IDC_CANCEL), busy);
 }
 void worker_main(HWND main, std::vector<std::wstring> files, std::wstring directory, nyaa::ConvertOptions options) {
@@ -221,11 +227,18 @@ void start_convert() {
     const auto directory = text(g_outdir); std::error_code ec;
     if (!directory.empty()) fs::create_directories(directory, ec);
     if (directory.empty() || ec || !fs::is_directory(directory, ec)) { MessageBoxW(g_main, L"输出文件夹不可用，请检查路径和写入权限。", kApp, MB_ICONERROR | MB_OK); return; }
-    auto options = g_settings; const auto grid = SendMessageW(g_grid, CB_GETCURSEL, 0, 0);
-    options.grid = grid == 0 ? 4 : grid == 2 ? 16 : 8;
+    auto options = g_settings;
+    const std::wstring grid_text = text(g_grid);
+    int grid = 8;
+    try { grid = std::stoi(grid_text); } catch (...) { grid = 8; }
+    if (grid < 1 || grid > 128) {
+        MessageBoxW(g_main, L"每拍格数请填 1..128 的整数。", kApp, MB_ICONINFORMATION | MB_OK);
+        return;
+    }
+    options.grid = grid;
     options.gliss = SendMessageW(g_gliss, CB_GETCURSEL, 0, 0) == 1 ? "keep" : "diatonic";
-    options.borrow_table = IsDlgButtonChecked(g_main, IDC_BORROW) == BST_CHECKED;
-    options.drum_fallback = IsDlgButtonChecked(g_main, IDC_DRUM_FALLBACK) == BST_CHECKED;
+    const int tmode = static_cast<int>(SendMessageW(g_tempo, CB_GETCURSEL, 0, 0));
+    options.tempo_mode = tmode == 2 ? "none" : tmode == 1 ? "changer" : "staircase";
     if (g_worker.joinable()) g_worker.join();
     drain_log(); SetWindowTextW(g_log, L""); g_cancel = false; g_running = true; set_busy(true);
     SendMessageW(g_pbar, PBM_SETRANGE32, 0, g_files.size()); SendMessageW(g_pbar, PBM_SETPOS, 0, 0); SetWindowTextW(g_status, L"正在转换…");
@@ -242,10 +255,9 @@ void layout() {
     int y = 80 + listHeight + 8;
     place(IDC_ADD, 12, y, 96, 28); place(IDC_REMOVE, 116, y, 88, 28); place(IDC_CLEAR, 212, y, 68, 28); place(IDC_COUNT, 292, y + 5, inner - 280, 22);
     y += 42; place(ID_OPTIONS, 12, y, inner, 22); y += 28;
-    place(ID_GRID, 12, y + 4, 65, 22); place(IDC_GRID, 80, y, 60, 200);
-    place(ID_GLISS, 156, y + 4, 36, 22); place(IDC_GLISS, 196, y, 112, 200);
-    place(IDC_BORROW, 326, y, 174, 26);
-    place(IDC_DRUM_FALLBACK, 508, y, 260, 26);
+    place(ID_GRID, 12, y + 4, 65, 22); place(IDC_GRID, 80, y, 96, 260);
+    place(ID_GLISS, 186, y + 4, 36, 22); place(IDC_GLISS, 224, y, 112, 200);
+    place(ID_TEMPO_LABEL, 350, y + 4, 60, 22); place(IDC_TEMPO, 412, y, 190, 240);
     place(IDC_ADVANCED, inner - 76, y, 76, 28);
     y += 34;
     place(ID_OUT, 12, y + 4, 52, 22); place(IDC_OUTDIR, 70, y, inner - 222, 26);
@@ -269,15 +281,19 @@ void build_ui() {
     g_list = control(g_main, L"LISTBOX", L"", WS_BORDER | WS_VSCROLL | WS_HSCROLL | WS_TABSTOP | LBS_EXTENDEDSEL | LBS_NOINTEGRALHEIGHT, IDC_LIST);
     for (const auto& pair : std::vector<std::pair<int, const wchar_t*>>{{IDC_ADD,L"添加文件…"},{IDC_REMOVE,L"移除选中"},{IDC_CLEAR,L"清空"},{IDC_ADVANCED,L"高级…"},{IDC_PICKOUT,L"选择…"},{IDC_OPENOUT,L"打开"},{IDC_CANCEL,L"停止"}}) control(g_main, L"BUTTON", pair.second, BS_PUSHBUTTON | WS_TABSTOP, pair.first);
     control(g_main, L"STATIC", L"", 0, IDC_COUNT); control(g_main, L"STATIC", L"② 选项（默认就行）", 0, ID_OPTIONS); control(g_main, L"STATIC", L"每拍格数", 0, ID_GRID);
-    g_grid = control(g_main, L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, IDC_GRID);
-    for (const wchar_t* value : {L"4",L"8",L"16"}) SendMessageW(g_grid, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(value));
-    SendMessageW(g_grid, CB_SETCURSEL, 1, 0); control(g_main, L"STATIC", L"滑音", 0, ID_GLISS);
+    g_grid = control(g_main, L"COMBOBOX", L"", CBS_DROPDOWN | CBS_AUTOHSCROLL | WS_VSCROLL | WS_TABSTOP, IDC_GRID);
+    for (const wchar_t* value : {L"【4/4 时值】", L"4", L"8", L"16", L"【6/8 时值】", L"6", L"12", L"24"})
+        SendMessageW(g_grid, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(value));
+    SetWindowTextW(g_grid, L"8");
+    control(g_main, L"STATIC", L"滑音", 0, ID_GLISS);
     g_gliss = control(g_main, L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, IDC_GLISS);
     for (const wchar_t* value : {L"调内装饰音",L"原样保留"}) SendMessageW(g_gliss, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(value));
     SendMessageW(g_gliss, CB_SETCURSEL, 0, 0);
-    g_borrow = control(g_main, L"BUTTON", L"自动换音色（推荐）", BS_AUTOCHECKBOX | WS_TABSTOP, IDC_BORROW); CheckDlgButton(g_main, IDC_BORROW, BST_CHECKED);
-    g_drum_fallback = control(g_main, L"BUTTON", L"识别沙锤、三角铁等打击乐", BS_AUTOCHECKBOX | WS_TABSTOP, IDC_DRUM_FALLBACK);
-    CheckDlgButton(g_main, IDC_DRUM_FALLBACK, BST_CHECKED);
+    control(g_main, L"STATIC", L"变速拟似", 0, ID_TEMPO_LABEL);
+    g_tempo = control(g_main, L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, IDC_TEMPO);
+    for (const wchar_t* value : {L"阶梯（按主速度）", L"TempoChanger（占位）", L"无（按开头）"})
+        SendMessageW(g_tempo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(value));
+    SendMessageW(g_tempo, CB_SETCURSEL, 0, 0);
     control(g_main, L"STATIC", L"输出到", 0, ID_OUT);
     g_outdir = control(g_main, L"EDIT", (fs::path(exe_dir()) / L"输出").c_str(), WS_BORDER | ES_AUTOHSCROLL | WS_TABSTOP, IDC_OUTDIR);
     g_start = control(g_main, L"BUTTON", L"③ 开始转换", BS_DEFPUSHBUTTON | WS_TABSTOP, IDC_START); g_pbar = control(g_main, PROGRESS_CLASSW, L"", 0, IDC_PBAR);
@@ -318,6 +334,13 @@ LRESULT CALLBACK wndproc(HWND hwnd, UINT message, WPARAM wp, LPARAM lp) {
                 case IDC_PICKOUT: pick_folder(); break;
                 case IDC_OPENOUT: open_folder(); break;
                 case IDC_ADVANCED: advanced(); break;
+                case IDC_GRID:
+                    if (HIWORD(wp) == CBN_SELCHANGE) {
+                        const std::wstring value = text(g_grid);
+                        if (!value.empty() && value[0] == L'【') SetWindowTextW(g_grid, g_grid_last.c_str());
+                        else g_grid_last = value;
+                    }
+                    break;
                 case IDC_START: start_convert(); break;
                 case IDC_CANCEL: g_cancel = true; EnableWindow(GetDlgItem(hwnd, IDC_CANCEL), FALSE); SetWindowTextW(g_status, L"当前文件结束后停止…"); break;
             }

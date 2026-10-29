@@ -13,6 +13,7 @@ struct ConvertOptions {
     std::string musescore;
     std::string key;
     std::string time_mode = "grid";
+    std::string tempo_mode = "staircase";   // staircase | changer | none
     double min_ms = 60.0;
     bool keep_midi = false;
     bool use_gp = true;

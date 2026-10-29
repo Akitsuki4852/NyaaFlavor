@@ -42,6 +42,15 @@ extern const char* const kPitchClassName[12];
 extern const char* const kPitchClassFlat[12];
 const char* gm_to_nbs(const std::string& name);
 
+enum class TempoMode { None = 0, Staircase = 1, Changer = 2 };
+
+struct TempoStepInfo {
+    double bpm = 0;
+    int tpb = 8;
+    double beats = 0;
+    int nbs_t0 = 0;
+};
+
 struct Options {
     int grid = 8;
     bool octave_modifier = true;
@@ -49,6 +58,7 @@ struct Options {
     bool drum_fallback = true;   // 表外打击乐默认走 u3002 / OpenNBS 表（--no-drum-fallback 关）
     bool separators = true;
     std::string time_mode = "grid";
+    TempoMode tempo_mode = TempoMode::Staircase;   // 变速拟似：阶梯 / TempoChanger（占位）/ 无
     std::string gliss = "diatonic";
     std::string key;  // 空 = 自动
     std::string gp;   // 空 = 无
@@ -112,6 +122,8 @@ struct Info {
     int grid = 8;
     int tempo = 0;
     std::vector<std::pair<int, int>> tempos;
+    std::vector<TempoStepInfo> tempo_steps;   // 变速拟似生效时的阶梯
+    TempoMode tempo_mode = TempoMode::None;
     double duration_sec = 0;
     std::map<std::string, int> stats;
     std::vector<int> unknown_drums;
