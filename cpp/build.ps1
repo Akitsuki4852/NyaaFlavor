@@ -42,6 +42,14 @@ foreach ($source in $commonSources) {
 }
 $commonSources += Join-Path $root 'third_party\tinyxml2\tinyxml2.cpp'
 
+# 版本资源（右键 exe -> 属性 -> 详细信息 里能看到 0.1.1）
+$versionRes = Join-Path $out 'version.res'
+$versionRc = Join-Path $src 'version.rc'
+$cmd = "`"$vcvars`" >nul 2>&1 && rc /nologo /fo `"$versionRes`" `"$versionRc`""
+cmd /c $cmd
+if ($LASTEXITCODE -ne 0) { throw "版本资源编译失败 (exit $LASTEXITCODE)" }
+$commonSources += $versionRes
+
 $optimizationFlags = if ($Optimize -eq 'size') { '/O1 /Os' } else { '/O2' }
 $cflags = "/nologo /std:c++20 /EHsc /GR- /W4 /permissive- /utf-8 $optimizationFlags /GL /Gy /Gw /GF /Zc:inline /GS /DNDEBUG /DUNICODE /D_UNICODE /D_SILENCE_CXX20_U8PATH_DEPRECATION_WARNING /MT"
 $lflags = "/LTCG /OPT:REF /OPT:ICF /INCREMENTAL:NO /NOLOGO"

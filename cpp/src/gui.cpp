@@ -361,7 +361,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
     WNDCLASSEXW cls{sizeof(cls)}; cls.lpfnWndProc = wndproc; cls.hInstance = instance; cls.hCursor = LoadCursorW(nullptr, IDC_ARROW);
     cls.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_BTNFACE + 1); cls.lpszClassName = L"NyaaFlavorMain"; cls.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
     if (!RegisterClassExW(&cls)) return 1;
-    HWND hwnd = CreateWindowExW(WS_EX_CONTROLPARENT, cls.lpszClassName, L"NyaaFlavor 0.1.0", WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, px(920), px(720), nullptr, nullptr, instance, nullptr);
+    HWND hwnd = CreateWindowExW(WS_EX_CONTROLPARENT, cls.lpszClassName, L"NyaaFlavor 0.1.1", WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, px(920), px(720), nullptr, nullptr, instance, nullptr);
     if (!hwnd) return 1;
     int count = 0;
     if (LPWSTR* arguments = CommandLineToArgvW(GetCommandLineW(), &count)) {
